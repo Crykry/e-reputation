@@ -6,11 +6,6 @@
         {% block stylesheets %}{% endblock %}
     </head>
     <body>
-    {% if not app.user %}
-        <li><a href="{{ path('security_login') }}">login</a></li>
-    {% else %}
-        <li><a href="{{ path('security_logout') }}">logout</a></li>
-    {% endif %}
         {% block body %}{% endblock %}
         {% block javascripts %}{% endblock %}
     </body>

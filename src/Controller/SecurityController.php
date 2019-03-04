@@ -3,87 +3,153 @@
 namespace App\Controller;
 
 use App\Entity\User;
-use App\Form\RegistrationType;
-use Doctrine\Common\Persistence\ObjectManager;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
 use Symfony\Component\HttpFoundation\Request;
+use Symfony\Component\HttpFoundation\Response;
 use Symfony\Component\Routing\Annotation\Route;
+use Symfony\Component\Routing\Generator\UrlGeneratorInterface;
 use Symfony\Component\Security\Core\Encoder\UserPasswordEncoderInterface;
+use Symfony\Component\Security\Csrf\TokenGenerator\TokenGeneratorInterface;
+use Symfony\Component\Security\Http\Authentication\AuthenticationUtils;
 
 class SecurityController extends AbstractController
 {
     /**
-     * @Route("/register", name="security_registration")
-     * @param Request $request -> contient les infos en provenance du formulaire -> requete HTTP
-     * @param ObjectManager $userManager
-     * @param UserPasswordEncoderInterface $encoder
-     * @return \Symfony\Component\HttpFoundation\Response
+     * @Route("/login", name="app_login")
      */
-    public function register(Request $request, ObjectManager $userManager, UserPasswordEncoderInterface $encoder) {
+    public function login(AuthenticationUtils $authenticationUtils): Response
+    {
+        // get the login error if there is one
+        $error = $authenticationUtils->getLastAuthenticationError();
+        // last username entered by the user
+        $lastUsername = $authenticationUtils->getLastUsername();
 
-        $user = new User();
+        return $this->render('security/login.html.twig', ['last_username' => $lastUsername, 'error' => $error]);
+    }
 
-        // Crée le formulaire -> seulement pour les essais avant intégration de VueJS
-        // Passage du User en paramètre pour le lier au formulaire
-        $form = $this->createForm(RegistrationType::class, $user);
+    /**
+     * @Route("/logout", name="app_logout")
+     */
+    public function logout()
+    {
+        return $this->redirectToRoute('homepage');
+    }
 
-        // Cette partie sera à modifiée après integration de vueJs
-        $form->handleRequest($request);
+    /**
+     * @Route("/register", name="app_register")
+     */
+    public function register(Request $request, UserPasswordEncoderInterface $passwordEncoder): Response
+    {
 
-        // Vérif submit
-        if ($form->isSubmitted() && $form->isValid()) {
+        if ($request->isMethod('POST')) {
+            $user = new User();
+            $user->setEmail($request->request->get('email'));
+            //$user->setUsername($request->request->get('username'));
+            $user->setPassword($passwordEncoder->encodePassword($user, $request->request->get('password')));
 
-            // encodage du password -> utilisation du composant security de Symfony
-            // pour fonctionner, ajouter l'encoder au niveau du fichier config/security.yaml
-            $hash = $encoder->encodePassword($user, $user->getPassword());
-            $user->setPassword($hash);
-
-            // Sauvegarde dans la BDD
-            $userManager->persist($user);
-            $userManager->flush();
-
-            return $this->redirectToRoute('security_login');
+            $em = $this->getDoctrine()->getManager();
+            $em->persist($user);
+            $em->flush();
+            return $this->redirectToRoute('app_login');
         }
 
-        // Cette partie sera à modifiée après intégration de vueJs
-        return $this->render('security/registration.html.twig', [
-            'form' => $form->createView()
-        ]);
+        return $this->render('security/register.html.twig');
     }
 
     /**
-     * @Route("/login", name="security_login")
-     * @return \Symfony\Component\HttpFoundation\Response
+     * @Route("/forgotten_password", name="app_forgotten_password")
+     * @param Request $request
+     * @param UserPasswordEncoderInterface $encoder
+     * @param \Swift_Mailer $mailer
+     * @param TokenGeneratorInterface $tokenGenerator
+     * @return Response
      */
-    public function login() {
+    public function forgottenPassword(
+        Request $request,
+        UserPasswordEncoderInterface $encoder,
+        \Swift_Mailer $mailer,
+        TokenGeneratorInterface $tokenGenerator
+    ): Response
+    {
 
-        // pour fonctionner, besoin d'ajouter un provider dans le fichier security.yaml
-        // dans ce cas le providers in-database à été ajouté
-        // c'est celui-vi qui se chargera de la connexion
+        if ($request->isMethod('POST')) {
 
-        return $this->render('security/login.html.twig');
+            $email = $request->request->get('email');
+
+            $entityManager = $this->getDoctrine()->getManager();
+            $user = $entityManager->getRepository(User::class)->findOneByEmail($email);
+            /* @var $user User */
+
+            if ($user === null) {
+                $this->addFlash('danger', 'Email Inconnu');
+                return $this->redirectToRoute('security/login.html.twig');
+            }
+            $token = $tokenGenerator->generateToken();
+
+            try{
+                $user->setResetToken($token);
+                $entityManager->flush();
+            } catch (\Exception $e) {
+                $this->addFlash('warning', $e->getMessage());
+                return $this->redirectToRoute('app_login');
+            }
+
+            $url = $this->generateUrl('app_reset_password', array('token' => $token), UrlGeneratorInterface::ABSOLUTE_URL);
+
+            $message = (new \Swift_Message('Forgot Password'))
+                ->setFrom('g.ponty@dev-web.io')
+                ->setTo($user->getEmail())
+                ->setBody(
+                    "blablabla voici le token pour reseter votre mot de passe : " . $url,
+                    'text/html'
+                );
+
+            $mailer->send($message);
+
+            $this->addFlash('notice', 'Mail envoyé');
+
+            return $this->redirectToRoute('app_login');
+        }
+
+        return $this->render('security/forgotten_password.html.twig');
     }
 
     /**
-     * @Route("/logout", name="security_logout")
+     * @Route("/reset_password/{token}", name="app_reset_password")
+     * @param Request $request
+     * @param string $token
+     * @param UserPasswordEncoderInterface $passwordEncoder
+     * @return \Symfony\Component\HttpFoundation\RedirectResponse|Response
      */
-    public function logout() {
+    public function resetPassword(Request $request, string $token, UserPasswordEncoderInterface $passwordEncoder)
+    {
+
+        if ($request->isMethod('POST')) {
+            $entityManager = $this->getDoctrine()->getManager();
+
+            $user = $entityManager->getRepository(User::class)->findOneByResetToken($token);
+            /* @var $user User */
+
+            if ($user === null) {
+                $this->addFlash('danger', 'Token Inconnu');
+                return $this->redirectToRoute('homepage');
+            }
+
+            $user->setResetToken(null);
+            $user->setPassword($passwordEncoder->encodePassword($user, $request->request->get('password')));
+            $entityManager->flush();
+
+            $this->addFlash('notice', 'Mot de passe mis à jour');
+
+            return $this->redirectToRoute('security/login.html.twig');
+        }else {
+
+            return $this->render('security/reset_password.html.twig', ['token' => $token]);
+        }
 
     }
+
+
+
 
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
